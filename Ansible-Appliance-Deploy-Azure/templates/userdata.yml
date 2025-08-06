@@ -1,0 +1,15 @@
+#cloud-config
+# INSTRUCTIONS: upload this file in the Custom Script section when creating a VM
+write_files:
+-   content: |
+        {{ admin_password }}
+    path: /home/admin/.password
+# CAUTION: Base64 encoded password to eliminate parsing errors, this is NOT secure or safe in any way
+# This is merely provided for your convenience
+# We recommend using the default firstrun mechanism instead by logging on to the VM console
+-   content: |
+        #Empty file
+    path: /loginvsi/first_run.chk
+runcmd:
+ - domainname {{ domainname }}
+ - /loginvsi/bin/firstrun

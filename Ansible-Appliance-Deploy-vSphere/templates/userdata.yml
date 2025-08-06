@@ -1,0 +1,17 @@
+#cloud-config
+output:
+  all: "| tee -a /var/log/cloud-init-output.log"
+
+write_files:
+  - content: |
+        {{ adminpassword }}
+    path: /home/admin/.password
+
+  - content: |
+        #Empty file
+    path: /loginvsi/first_run.chk
+
+runcmd:
+  - if {{ setstaticip | lower }}; then /loginvsi/bin/menu/changenetwork {{ networkinterface }} static {{ ipv4address }} {{ ipv4netmask }} "{{ nameservers }}" "{{ searchdomain }}" {{ ipv4gateway }}; fi
+  - domainname {{ domainname }}
+  - /loginvsi/bin/firstrun

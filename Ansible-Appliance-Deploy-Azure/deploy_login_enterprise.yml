@@ -1,0 +1,215 @@
+---
+- name: Deploy Login Enterprise VHD to Azure using Azure CLI
+  hosts: localhost
+  gather_facts: no
+  vars:
+    # Azure Configuration
+    subscription_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    location: "UK South"
+    
+    # VM Configuration
+    vm_size: "Standard_D4s_v3"
+    admin_username: "admin"
+    admin_password: "UGFzc3dvcmQxMDAK" # Base64 encoded "Password100"
+    
+    # Storage Configuration
+    vhd_path: "/Users/username/Downloads/AZ-VA-LoginEnterprise-6.1.14.vhd"
+    storage_container: "vhds"
+    
+    # Network Configuration
+    subnet_name: "default"
+    
+    # Network Settings
+    create_vnet: true
+    create_subnet: true
+    
+    # Login Enterprise Configuration - do not change this value
+    domainname: "placeholder"
+
+  pre_tasks:
+    - name: Generate random suffix
+      set_fact:
+        random_suffix: "{{ 100000 | random }}"
+    
+    - name: Set resource names with random suffix
+      set_fact:
+        resource_group: "login-enterprise-rg-{{ random_suffix }}"
+        vm_name: "login-enterprise-{{ random_suffix }}"
+        storage_account: "leappliance{{ random_suffix }}"
+        vnet_name: "login-enterprise-vnet-{{ random_suffix }}"
+    
+    - name: Set dependent resource names
+      set_fact:
+        public_ip_name: "{{ vm_name }}-pip"
+        network_interface_name: "{{ vm_name }}-nic"
+        network_security_group_name: "{{ vm_name }}-nsg"
+        domainname: "le-{{ random_suffix }}.{{ location | lower | replace(' ', '') }}.cloudapp.azure.com"
+
+  tasks:
+    - name: Generate cloud-init userdata
+      template:
+        src: templates/userdata.yml
+        dest: /tmp/userdata.yml
+      register: userdata_result
+
+    - name: Create resource group
+      command: az group create --name "{{ resource_group }}" --location "{{ location }}"
+      register: rg_result
+      changed_when: rg_result.rc == 0
+      failed_when: rg_result.rc != 0
+      ignore_errors: yes
+
+    - name: Create storage account
+      command: az storage account create --resource-group "{{ resource_group }}" --name "{{ storage_account }}" --location "{{ location }}" --sku Standard_LRS
+      register: storage_result
+      changed_when: storage_result.rc == 0
+      failed_when: storage_result.rc != 0
+      ignore_errors: yes
+
+    - name: Create storage container
+      command: az storage container create --account-name "{{ storage_account }}" --name "{{ storage_container }}"
+      register: container_result
+      changed_when: container_result.rc == 0
+      failed_when: container_result.rc != 0
+      ignore_errors: yes
+
+    - name: Upload VHD to storage
+      command: az storage blob upload --account-name "{{ storage_account }}" --container-name "{{ storage_container }}" --name "{{ vm_name }}.vhd" --file "{{ vhd_path }}" --type page
+      register: upload_result
+      changed_when: upload_result.rc == 0
+      failed_when: upload_result.rc != 0
+      ignore_errors: yes
+
+    - name: Create virtual network (if requested)
+      command: az network vnet create --resource-group "{{ resource_group }}" --name "{{ vnet_name }}" --subnet-name "{{ subnet_name }}" --address-prefix 10.0.0.0/16 --subnet-prefix 10.0.1.0/24
+      register: vnet_result
+      changed_when: vnet_result.rc == 0
+      failed_when: vnet_result.rc != 0
+      ignore_errors: yes
+      when: create_vnet
+
+    - name: Create network security group
+      command: az network nsg create --resource-group "{{ resource_group }}" --name "{{ network_security_group_name }}"
+      register: nsg_result
+      changed_when: nsg_result.rc == 0
+      failed_when: nsg_result.rc != 0
+      ignore_errors: yes
+
+    - name: Add SSH rule to NSG
+      command: az network nsg rule create --resource-group "{{ resource_group }}" --nsg-name "{{ network_security_group_name }}" --name SSH --protocol tcp --priority 100 --destination-port-range 22 --access allow
+      register: ssh_rule_result
+      changed_when: ssh_rule_result.rc == 0
+      failed_when: ssh_rule_result.rc != 0
+      ignore_errors: yes
+
+    - name: Add HTTPS rule to NSG
+      command: az network nsg rule create --resource-group "{{ resource_group }}" --nsg-name "{{ network_security_group_name }}" --name HTTPS --protocol tcp --priority 101 --destination-port-range 443 --access allow
+      register: https_rule_result
+      changed_when: https_rule_result.rc == 0
+      failed_when: https_rule_result.rc != 0
+      ignore_errors: yes
+
+    - name: Add HTTP rule to NSG
+      command: az network nsg rule create --resource-group "{{ resource_group }}" --nsg-name "{{ network_security_group_name }}" --name HTTP --protocol tcp --priority 102 --destination-port-range 80 --access allow
+      register: http_rule_result
+      changed_when: http_rule_result.rc == 0
+      failed_when: http_rule_result.rc != 0
+      ignore_errors: yes
+
+    - name: Create public IP
+      command: az network public-ip create --resource-group "{{ resource_group }}" --name "{{ public_ip_name }}" --allocation-method Static --dns-name "le-{{ random_suffix }}"
+      register: pip_result
+      changed_when: pip_result.rc == 0
+      failed_when: pip_result.rc != 0
+      ignore_errors: yes
+
+    - name: Create network interface
+      command: az network nic create --resource-group "{{ resource_group }}" --name "{{ network_interface_name }}" --vnet-name "{{ vnet_name }}" --subnet "{{ subnet_name }}" --network-security-group "{{ network_security_group_name }}" --public-ip-address "{{ public_ip_name }}"
+      register: nic_result
+      changed_when: nic_result.rc == 0
+      failed_when: nic_result.rc != 0
+      ignore_errors: yes
+
+    - name: Get storage account key
+      command: az storage account keys list --resource-group "{{ resource_group }}" --account-name "{{ storage_account }}" --query "[0].value" --output tsv
+      register: storage_key_result
+      changed_when: storage_key_result.rc == 0
+      failed_when: storage_key_result.rc != 0
+      ignore_errors: yes
+
+    - name: Create VM from VHD
+      command: az vm create --resource-group "{{ resource_group }}" --name "{{ vm_name }}" --size "{{ vm_size }}" --admin-username "{{ admin_username }}" --admin-password "{{ admin_password }}" --nics "{{ network_interface_name }}" --image "https://{{ storage_account }}.blob.core.windows.net/{{ storage_container }}/{{ vm_name }}.vhd" --os-type Linux --use-unmanaged-disk --storage-account "{{ storage_account }}" --custom-data /tmp/userdata.yml
+      register: vm_result
+      changed_when: vm_result.rc == 0
+      failed_when: vm_result.rc != 0
+      ignore_errors: yes
+
+    - name: Wait for VM to be ready
+      command: az vm show --resource-group "{{ resource_group }}" --name "{{ vm_name }}" --query "provisioningState" --output tsv
+      register: vm_status
+      until: vm_status.stdout == "Succeeded"
+      retries: 10
+      delay: 30
+      ignore_errors: yes
+
+    - name: Get VM public IP
+      command: az network public-ip show --resource-group "{{ resource_group }}" --name "{{ public_ip_name }}" --query "ipAddress" --output tsv
+      register: public_ip_result
+      ignore_errors: yes
+
+    - name: Display VM information
+      debug:
+        msg: |
+          ========================================
+          LOGIN ENTERPRISE AZURE DEPLOYMENT
+          ========================================
+          VM Name: {{ vm_name }}
+          Public IP: {{ public_ip_result.stdout | default('N/A') }}
+          Resource Group: {{ resource_group }}
+          Location: {{ location }}
+          VNet: {{ vnet_name }}
+          Subnet: {{ subnet_name }}
+          ========================================
+          ACCESS INFORMATION
+          ========================================
+          Domain Name: {{ domainname }}
+          HTTPS URL: https://{{ domainname }}
+          SSH Access: ssh azureuser@{{ public_ip_result.stdout | default('N/A') }}
+          ========================================
+
+    - name: Display domain name prominently
+      debug:
+        msg: |
+          🌐 LOGIN ENTERPRISE DOMAIN NAME: {{ domainname }}
+          🔗 ACCESS URL: https://{{ domainname }}
+
+    - name: Cleanup temporary files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/userdata.yml
+
+  post_tasks:
+    - name: Cleanup resources on failure
+      command: az group delete --resource-group "{{ resource_group }}" --yes --no-wait
+      when: 
+        - rg_result is failed or 
+          storage_result is failed or 
+          upload_result is failed or 
+          vnet_result is failed or 
+          nsg_result is failed or 
+          ssh_rule_result is failed or 
+          https_rule_result is failed or 
+          http_rule_result is failed or 
+          pip_result is failed or 
+          nic_result is failed or 
+          storage_key_result is failed or 
+          vm_result is failed or 
+          vm_status is failed
+      ignore_errors: yes
+
+  handlers:
+    - name: Cleanup failed deployment
+      command: az vm delete --resource-group "{{ resource_group }}" --name "{{ vm_name }}" --yes
+      listen: cleanup_vm 

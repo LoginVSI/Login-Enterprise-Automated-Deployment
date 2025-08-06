@@ -1,0 +1,111 @@
+- name: Deploy Login Enterprise OVA to vSphere (Fixed)
+  hosts: localhost
+  gather_facts: no
+  vars:
+    vcenter_hostname: "vcsa.lab.local"
+    vcenter_username: "administrator@vsphere.local"
+    vcenter_password: "Password100"
+    datacenter: "Lab"
+    cluster: "SM"
+    datastore: "ESX3_SSD"
+    network_name: "LAB_110"
+    hostname: "login-enterprise-001"
+    ovf_path: "/Users/username/Downloads/VA-LoginEnterprise-6.1.14.ova"
+    adminpassword: "UGFzc3dvcmQxMDAK" # Base64 encoded "Password100"
+    domainname: "lab.local"
+    
+    # Add cloud-init specific variables
+    setstaticip: true
+    networkinterface: "ens192"
+    ipv4address: "192.168.1.100"
+    ipv4netmask: "255.255.255.0"
+    nameservers: "8.8.8.8,8.8.4.4"
+    searchdomain: "lab.local"
+    ipv4gateway: "192.168.1.1"
+
+  tasks:
+    - name: Generate cloud-init metadata
+      template:
+        src: templates/metadata.yml
+        dest: /tmp/metadata.yml
+      register: metadata_result
+
+    - name: Generate cloud-init userdata
+      template:
+        src: templates/userdata.yml
+        dest: /tmp/userdata.yml
+      register: userdata_result
+
+    - name: Step 1 - Deploy Login Enterprise OVA
+      community.vmware.vmware_deploy_ovf:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: false
+        datacenter: "{{ datacenter }}"
+        cluster: "{{ cluster }}"
+        datastore: "{{ datastore }}"
+        name: "{{ hostname }}"
+        ovf: "{{ ovf_path }}"
+        networks:
+          "Prod_NW": "{{ network_name }}"
+        inject_ovf_env: false
+        wait: true
+        power_on: false
+        disk_provisioning: thin
+
+    - name: Step 2 - Set guestinfo properties using advanced_settings
+      community.vmware.vmware_guest:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: false
+        datacenter: "{{ datacenter }}"
+        name: "{{ hostname }}"
+        advanced_settings:
+          - key: "guestinfo.metadata"
+            value: "{{ lookup('file', '/tmp/metadata.yml') | b64encode }}"
+          - key: "guestinfo.metadata.encoding"
+            value: "base64"
+          - key: "guestinfo.userdata"
+            value: "{{ lookup('file', '/tmp/userdata.yml') | b64encode }}"
+          - key: "guestinfo.userdata.encoding"
+            value: "base64"
+
+    - name: Wait for VMX file to be updated
+      wait_for:
+        timeout: 10
+
+    - name: Step 3 - Power on the VM
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: false
+        name: "{{ hostname }}"
+        state: powered-on
+        datacenter: "{{ datacenter }}"
+      register: power_result
+      retries: 2
+      delay: 10
+      until: power_result is succeeded
+
+    - name: Cleanup temporary files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/metadata.yml
+        - /tmp/userdata.yml
+
+  handlers:
+    - name: Cleanup failed VM
+      community.vmware.vmware_guest:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: false
+        datacenter: "{{ datacenter }}"
+        name: "{{ hostname }}"
+        state: absent
+      listen: cleanup_vm 
